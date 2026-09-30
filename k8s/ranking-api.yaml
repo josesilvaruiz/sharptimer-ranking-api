@@ -1,0 +1,77 @@
+# API independiente de solo lectura sobre la BD MariaDB de SharpTimer.
+# hostNetwork: true porque MariaDB solo escucha en 127.0.0.1 del host (igual que el
+# pod de cs2). Así el pod la alcanza directamente, y de paso el bot de Discord (que
+# corre como systemd en el propio host) puede pegarle también por 127.0.0.1.
+#
+# El Secret (ranking-api-secrets: DB_PASSWORD, API_KEY) NO vive en este repo —
+# se aplica una sola vez a mano en el cluster. El ConfigMap con el script sí lo
+# gestiona el workflow de deploy (kubectl create configmap ... --from-file en cada push).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ranking-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ranking-api
+  namespace: ranking-api
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: ranking-api }
+  template:
+    metadata:
+      labels: { app: ranking-api }
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: python:3.12-alpine
+          command: ["sh", "-c", "pip install --quiet --no-cache-dir --user flask pymysql && exec python -u /app/ranking_api.py"]
+          env:
+            - { name: PORT, value: "8088" }
+            - { name: DB_HOST, value: "127.0.0.1" }
+            - { name: DB_PORT, value: "3306" }
+            - { name: DB_USER, value: "sharptimer_user" }
+            - { name: DB_NAME, value: "sharptimer_db" }
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+            - { name: HOME, value: "/home/api" }
+            - { name: PATH, value: "/home/api/.local/bin:/usr/local/bin:/usr/bin:/bin" }
+          envFrom:
+            - secretRef: { name: ranking-api-secrets }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: script, mountPath: /app, readOnly: true }
+            - { name: home, mountPath: /home/api }
+      volumes:
+        - name: script
+          configMap: { name: ranking-api-script }
+        - name: home
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ranking-api
+  namespace: ranking-api
+spec:
+  selector: { app: ranking-api }
+  ports:
+    - port: 8088
+      targetPort: 8088
